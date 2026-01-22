@@ -1,15 +1,16 @@
 #!/usr/local/bin/python3
 
-import requests,logging,time,asyncio,httpx,os,json
+import requests,logging,time,asyncio,httpx,os
 from pathlib import Path
 from dotenv import load_dotenv
 
-HA_URL = HA_TOKEN = TELEGRAM_CHATID = TELEGRAM_TOKEN = ""
+HA_URL = HA_TOKEN = API_TOKEN = TELEGRAM_CHATID = TELEGRAM_TOKEN = ""
 GREEN = [0, 255, 0]
 RED = [255, 0, 0]
 YELLOW = [255, 255, 0]
 MEMORY_UPDATED = False
 logging.basicConfig(filename=os.path.join(Path(__file__).resolve().parent,"log.txt"),level=logging.ERROR,format='%(asctime)s - Alertmap-Ukraine - %(levelname)s - %(message)s',datefmt='%d-%m-%Y %H:%M:%S')
+memory_file = os.path.join(Path(__file__).resolve().parent,"memory.json")
 
 regions = {
   "м. Київ": "led_27_kyiv",
@@ -38,38 +39,52 @@ regions = {
   "Запорізька область": "led_22_zaporizska",
   "Харківська область": "led_19_kharkivska",
   "Дніпропетровська область": "led_18_dnipropertovska",
+  "м. Севастополь": "empty"
 }
 
-memory_example = {
-  region: {
-    "district": False
-  }
-  for region in regions
-}
-
-#loading some secrets
-load_dotenv()
+regions_api_map = [
+  "Автономна Республіка Крим",
+  "Волинська область",
+  "Вінницька область",
+  "Дніпропетровська область",
+  "Донецька область",
+  "Житомирська область",
+  "Закарпатська область",
+  "Запорізька область",
+  "Івано-Франківська область",
+  "м. Київ",
+  "Київська область",
+  "Кіровоградська область",
+  "Луганська область",
+  "Львівська область",
+  "Миколаївська область",
+  "Одеська область",
+  "Полтавська область",
+  "Рівненська область",
+  "м. Севастополь",
+  "Сумська область",
+  "Тернопільська область",
+  "Харківська область",
+  "Херсонська область",
+  "Хмельницька область",
+  "Черкаська область",
+  "Чернівецька область",
+  "Чернігівська область",
+]
 
 async def send_to_telegram(message: str, subject: str = "__name__", ) -> None:
   """Sends messages via Telegram if TELEGRAM_CHATID and TELEGRAM_TOKEN are both set. Requires "message" parameters and can accept "subject" """
   if TELEGRAM_CHATID and TELEGRAM_TOKEN:
-    headers = {
-      'Content-Type': 'application/json'
-    }
     data = {
       "chat_id": f"{TELEGRAM_CHATID}",
       "text": f"{subject}\n{message}"
     }
     try:
       async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          headers=headers,
-          json=data
-        )
+        response = await client.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",json=data)
       print(response.status_code)
       if response.status_code != 200:
-        logging.error("error", f"Telegram bot error! Status: {response.status_code} Body: {response.text}")
+        logging.error(f"Telegram bot error! Status: {response.status_code} Body: {response.text}")
     except Exception as err:
       logging.error(f"Error while sending message to Telegram: {err}")
 
@@ -97,57 +112,60 @@ def main():
   """Main function"""
   try:
     global MEMORY_UPDATED
-    #initializing memory array. If it is not exists - we are getting from example one
-    if not os.path.exists(os.path.join(Path(__file__).resolve().parent,"memory.json")):
-      memory = memory_example
-      logging.info(f"Config file with memory.array CREATED from the example.")
-    else:
-      with open(os.path.join(Path(__file__).resolve().parent,"memory.json"), "r", encoding="utf-8") as f:
-        memory = json.load(f)
+    #loading some secrets
+    load_dotenv()
+    #initializing memory array
+    if os.path.exists(memory_file):
+      with open(memory_file, "r", encoding="utf-8") as f:
+        memory = f.read()
         MEMORY_UPDATED = True
-    logging.info(f"Config file with memory.array loaded successfully from {os.path.join(Path(__file__).resolve().parent,'memory.json')}")
-    url_api = "https://jaam.net.ua/alerts_statuses_v1.json"
+    logging.info(f"Stored data loaded successfully from {os.path.join(Path(__file__).resolve().parent,'memory.json')}")
+    API_TOKEN = os.getenv('API_TOKEN')
+    url_api = f"https://api.alerts.in.ua/v1/iot/active_air_raid_alerts_by_oblast.json?token={API_TOKEN}"
     headers = {
       "User-Agent": "Hand_written_python_script",
       "Content-Type": "application/json"
     }
-    data = requests.get(url_api, headers=headers).json()
+    response = requests.get(url_api, headers=headers).json()
+    #check response
+    if len(response) != len(regions_api_map):
+      print(f"Неверная длина ответа: {len(response)} != {len(regions)}")
+      raise ValueError(f"Неверная длина ответа: {len(response)} != {len(regions)}")
+    #saving new data to future save to file
+    new_region_status = ""
     #logging what we've got for debug purpose if DEBUG is enabled in logger
-    logging.info(data)
-    if data["version"]:
-      #start parsing data from API
-      for id, name in enumerate(regions,1):
-        #if memory table is actual and updated
-        if MEMORY_UPDATED and memory[name]["enabled"] == data["states"][name]["enabled"] and data["states"][name]["district"] == memory[name]["district"]:
-          logging.info(f"Skipping changing state of {name}")
-          continue
-        #if there is alarm and not District
-        if data["states"][name]["enabled"]: #$and not data["states"][name]["district"]:
-          logging.info(f"{regions.get(name)}=True and District=False has set to Red")
-          memory[name]["enabled"] = True
-          memory[name]["district"] = False
-          set_state(regions.get(name),RED)
-        #if Partitial alarm(disabled, waiting for the new API access)
-        # elif data["states"][name]["enabled"] and data["states"][name]["district"]:
-        #     memory[name]["enabled"] = True
-        #     memory[name]["district"] = True
-        #     logging.info(f"{regions.get(name)}=True and District=True has set to Yellow")
-        #     set_state(regions.get(name),YELLOW)
-        #if no alarm
+    logging.info(response)
+    for region_id,status in enumerate(response,0):
+      #if memory table is actual and updated  
+      if MEMORY_UPDATED and status == memory[region_id]:
+        logging.info(f"Skipping region {regions_api_map[region_id]} and status={memory[region_id]}={status}")
+        #saving current status for future save to file.
+        new_region_status += status
+        continue
+      #if memory table is avaliable and some data changed
+      elif MEMORY_UPDATED and status != memory[region_id]:
+        if status == "A":
+          set_state(regions.get(regions_api_map[region_id]),RED)
+        elif status == "P":
+          set_state(regions.get(regions_api_map[region_id]),YELLOW)
         else:
-          memory[name]["enabled"] = False
-          memory[name]["district"] = False
-          logging.info(f"{regions.get(name)}=False and set to Green")
-          set_state(regions.get(name),GREEN)
-        logging.error(f"Data changed for: {name}")
+          set_state(regions.get(regions_api_map[region_id]),GREEN)
+        logging.info(f"{regions_api_map[region_id]} status changed to {status}")
+        new_region_status += status
+      #if memory not available - setting all zones to actual status
+      elif not MEMORY_UPDATED:
+        if status == "A":
+          set_state(regions.get(regions_api_map[region_id]),RED)
+        elif status == "P":
+          set_state(regions.get(regions_api_map[region_id]),YELLOW)
+        else:
+          set_state(regions.get(regions_api_map[region_id]),GREEN)
+        logging.info(f"{regions_api_map[region_id]} status changed to {status}")
+        new_region_status += status
         time.sleep(0.5)
-      logging.info("Data updated")
-      with open(os.path.join(Path(__file__).resolve().parent,"memory.json"), "w", encoding="utf-8") as f:
-          json.dump(memory, f, ensure_ascii=False, indent=2)
-          logging.info(f"Config file with memory.array saved successfully to {os.path.join(Path(__file__).resolve().parent,'memory.json')}")
-    else:
-        logging.error("Some error during getting JSON from API and parsing")
-        asyncio.run(send_to_telegram("Some error during getting JSON from API and parsing",f"🚒AlarmMap-Ukraine update script:"))
+    with open(memory_file, "w", encoding="utf-8") as f:
+      f.write(new_region_status)
+    logging.info(f"Actual data saved successfully to {os.path.join(Path(__file__).resolve().parent,'memory.json')}")
   except Exception as err:
     logging.error(f"main() global error: {err}")
     asyncio.run(send_to_telegram(f"main() global error: {err}",f"🚒AlarmMap-Ukraine update script:"))
