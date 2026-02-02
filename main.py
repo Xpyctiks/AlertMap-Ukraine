@@ -4,7 +4,7 @@ import requests,logging,time,asyncio,httpx,os
 from pathlib import Path
 from dotenv import load_dotenv
 
-HA_URL = HA_TOKEN = API_TOKEN = TELEGRAM_CHATID = TELEGRAM_TOKEN = ""
+HA_URL = HA_TOKEN = API_TOKEN = TELEGRAM_CHATID = TELEGRAM_TOKEN = LED_GROUP_NAME = LED_ENTITY = API_URL = ""
 GREEN = [0, 255, 0]
 RED = [255, 0, 0]
 YELLOW = [255, 255, 0]
@@ -74,6 +74,7 @@ regions_api_map = [
 
 async def send_to_telegram(message: str, subject: str = "__name__", ) -> None:
   """Sends messages via Telegram if TELEGRAM_CHATID and TELEGRAM_TOKEN are both set. Requires "message" parameters and can accept "subject" """
+  global TELEGRAM_CHATID, TELEGRAM_TOKEN
   if TELEGRAM_CHATID and TELEGRAM_TOKEN:
     data = {
       "chat_id": f"{TELEGRAM_CHATID}",
@@ -88,16 +89,71 @@ async def send_to_telegram(message: str, subject: str = "__name__", ) -> None:
     except Exception as err:
       logging.error(f"Error while sending message to Telegram: {err}")
 
+def load_config():
+  global HA_URL, HA_TOKEN, API_TOKEN, TELEGRAM_CHATID, TELEGRAM_TOKEN, LED_GROUP_NAME, LED_ENTITY, API_URL
+  load_dotenv(verbose=True)
+  LED_GROUP_NAME = os.getenv('LED_GROUP_NAME','')
+  TELEGRAM_TOKEN = os.getenv('TELEGRAM_CHATID','')
+  TELEGRAM_CHATID = os.getenv('TELEGRAM_TOKEN','')
+  API_TOKEN = os.getenv('API_TOKEN','')
+  API_URL = os.getenv('API_URL','')
+  HA_TOKEN = os.getenv('HA_TOKEN','')
+  HA_URL = os.getenv('HA_URL','')
+  LED_ENTITY = os.getenv('LED_ENTITY','')
+  if not API_TOKEN or not HA_TOKEN or not HA_URL or not API_URL or not LED_ENTITY:
+    print("ERROR! Some important value like API_TOKEN,HA_TOKEN,HA_URL,API_URL,LED_ENTITY is not configiured in .env file! Can't proceed...")
+    logging.error("ERROR! Some important value like API_TOKEN,HA_TOKEN,HA_URL,API_URL,LED_ENTITY is not configiured in .env file! Can't proceed...")
+    print("""
+Check (create if necessary) .env file with the following parameters, fill in the values with yours:
+HA_URL = "http://homeassistant.local"
+HA_TOKEN = "adfadsfasfadsfasdfasdfasdfasdfasdf"
+TELEGRAM_CHATID = "123123123"
+TELEGRAM_TOKEN = "adsfgasfasfasdfasfasdfasdf"
+API_TOKEN = "dsfgdsfgdsfgdsfg"
+API_URL = "https://api.alerts.in.ua/v1/iot/active_air_raid_alerts_by_oblast.json"
+LED_GROUP_NAME = "alertmap_ukraine_all_lights"
+LED_ENTITY = "alertmap_esp8266"
+    """)
+    quit(1)
+    if TELEGRAM_TOKEN and TELEGRAM_CHATID:
+      asyncio.run(send_to_telegram("ERROR! Some important value like API_TOKEN,HA_TOKEN,HA_URL is not configiured in .env file! Can't proceed...",f"🚒AlarmMap-Ukraine update script:"))
+
+def check_state() -> bool:
+  try:
+    global LED_GROUP_NAME
+    if LED_GROUP_NAME:
+      url = os.path.join(HA_URL,'api/states/light.'+LED_GROUP_NAME)
+      headers = {
+        "Authorization": f"Bearer {os.getenv('HA_TOKEN')}",
+        "Content-Type": "application/json"
+      }
+      response = requests.get(url, headers=headers).json()
+      if response["entity_id"] and response.get("entity_id") == "light.alertmap_ukraine_all_lights":
+        if response.get("state") == "off":
+          return False
+        else:
+          return True
+      else:
+        logging.error("Get LED GROUP state response error! real state of the leds may be different from the current alerts state!")
+        return True
+    else:
+      logging.error("LED GROUP is not defined! real state of the leds may be different from the current alerts state!")
+      return True
+  except Exception as err:
+    logging.error(f"check_state() general error: {err}")
+    asyncio.run(send_to_telegram(f"check_state() general error: {err}",f"🚒AlarmMap-Ukraine update script:"))  
+    return False
+
 def set_state(led_id: str, color: list = [0,0,255]):
   """Makes API requests to HomeAssistant and sets a state of every LED"""
   try:
-    url_ha = os.getenv('HA_URL')
+    url_ha = os.path.join(HA_URL,'api/services/light/turn_on')
     headers = {
-      "Authorization": f"Bearer {os.getenv('HA_TOKEN')}",
+      "Authorization": f"Bearer {HA_TOKEN}",
       "Content-Type": "application/json"
     }
     data = {
-      "entity_id": f"light.alertmap_esp8266_{led_id}",
+      "entity_id": f"light.{LED_ENTITY}_{led_id}",
       "rgb_color": color,
       "brightness": 255
     }
@@ -111,17 +167,16 @@ def set_state(led_id: str, color: list = [0,0,255]):
 def main():
   """Main function"""
   try:
+    load_config()
     global MEMORY_UPDATED
-    #loading some secrets
-    load_dotenv()
+    LEDS_ARE_OK = check_state()
     #initializing memory array
     if os.path.exists(memory_file):
       with open(memory_file, "r", encoding="utf-8") as f:
         memory = f.read()
         MEMORY_UPDATED = True
     logging.info(f"Stored data loaded successfully from {os.path.join(Path(__file__).resolve().parent,'memory.json')}")
-    API_TOKEN = os.getenv('API_TOKEN')
-    url_api = f"https://api.alerts.in.ua/v1/iot/active_air_raid_alerts_by_oblast.json?token={API_TOKEN}"
+    url_api = f"{API_URL}?token={API_TOKEN}"
     headers = {
       "User-Agent": "Hand_written_python_script",
       "Content-Type": "application/json"
@@ -137,13 +192,13 @@ def main():
     logging.info(response)
     for region_id,status in enumerate(response,0):
       #if memory table is actual and updated  
-      if MEMORY_UPDATED and status == memory[region_id]:
+      if MEMORY_UPDATED and status == memory[region_id] and LEDS_ARE_OK:
         logging.info(f"Skipping region {regions_api_map[region_id]} and status={memory[region_id]}={status}")
         #saving current status for future save to file.
         new_region_status += status
         continue
       #if memory table is avaliable and some data changed
-      elif MEMORY_UPDATED and status != memory[region_id]:
+      elif MEMORY_UPDATED and status != memory[region_id] and LEDS_ARE_OK:
         if status == "A":
           set_state(regions.get(regions_api_map[region_id]),RED)
         elif status == "P":
@@ -153,7 +208,7 @@ def main():
         logging.info(f"{regions_api_map[region_id]} status changed to {status}")
         new_region_status += status
       #if memory not available - setting all zones to actual status
-      elif not MEMORY_UPDATED:
+      elif not MEMORY_UPDATED or not LEDS_ARE_OK:
         if status == "A":
           set_state(regions.get(regions_api_map[region_id]),RED)
         elif status == "P":
