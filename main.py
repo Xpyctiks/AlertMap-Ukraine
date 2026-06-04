@@ -1,14 +1,27 @@
 #!/usr/local/bin/python3
 
-import requests,logging,time,asyncio,httpx,os
+import requests
+import logging
+import time as delay
+import asyncio
+import httpx
+import os
+from datetime import datetime, time
 from pathlib import Path
 from dotenv import load_dotenv
 
+VERSION="1.1.0"
 HA_URL = HA_TOKEN = API_TOKEN = TELEGRAM_CHATID = TELEGRAM_TOKEN = LED_GROUP_NAME = LED_ENTITY = API_URL = ""
 GREEN = [0, 255, 0]
 RED = [255, 0, 0]
 YELLOW = [255, 255, 0]
 MEMORY_UPDATED = False
+DAY_NIGHT_ENABLED = True
+DAY_NIGHT_FROM = ""
+DAY_NIGHT_TO = ""
+DAY_NIGHT_DAYBRIGHTNESS = 255
+DAY_NIGHT_NIGHTBRIGHTNESS = 90
+
 logging.basicConfig(filename=os.path.join(Path(__file__).resolve().parent,"log.txt"),level=logging.ERROR,format='%(asctime)s - Alertmap-Ukraine - %(levelname)s - %(message)s',datefmt='%d-%m-%Y %H:%M:%S')
 memory_file = os.path.join(Path(__file__).resolve().parent,"memory.json")
 
@@ -83,7 +96,6 @@ async def send_to_telegram(message: str, subject: str = "__name__", ) -> None:
     try:
       async with httpx.AsyncClient(timeout=10) as client:
         response = await client.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",json=data)
-      print(response.status_code)
       if response.status_code != 200:
         logging.error(f"Telegram bot error! Status: {response.status_code} Body: {response.text}")
     except Exception as err:
@@ -144,6 +156,18 @@ def check_state() -> bool:
     asyncio.run(send_to_telegram(f"check_state() general error: {err}",f"🚒AlarmMap-Ukraine update script:"))  
     return False
 
+def get_day_night() -> int:
+  #if not enabled, just return brightness value of the day
+  if not DAY_NIGHT_ENABLED:
+    return DAY_NIGHT_DAYBRIGHTNESS
+  #if enabled
+  now = datetime.now().time()
+  #if there is night
+  if (now >= time(23, 0) or now < time(7, 0)):
+    return DAY_NIGHT_NIGHTBRIGHTNESS
+  else:
+    return DAY_NIGHT_DAYBRIGHTNESS
+
 def set_state(led_id: str, color: list = [0,0,255]):
   """Makes API requests to HomeAssistant and sets a state of every LED"""
   try:
@@ -155,7 +179,7 @@ def set_state(led_id: str, color: list = [0,0,255]):
     data = {
       "entity_id": f"light.{LED_ENTITY}_{led_id}",
       "rgb_color": color,
-      "brightness": 255
+      "brightness": get_day_night()
     }
     response = requests.post(url_ha, headers=headers, json=data)
     #logging what we've got for debug purpose if DEBUG is enabled in logger
@@ -217,7 +241,7 @@ def main():
           set_state(regions.get(regions_api_map[region_id]),GREEN)
         logging.info(f"{regions_api_map[region_id]} status changed to {status}")
         new_region_status += status
-        time.sleep(0.5)
+        delay.sleep(0.5)
     with open(memory_file, "w", encoding="utf-8") as f:
       f.write(new_region_status)
     logging.info(f"Actual data saved successfully to {os.path.join(Path(__file__).resolve().parent,'memory.json')}")
